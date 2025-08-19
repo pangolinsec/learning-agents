@@ -7,9 +7,12 @@ from llama_index.llms.ollama import Ollama
 
 # Embedding and vector store imports
 import chromadb
+#from chromadb.utils.batch_utils import create_batches
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.core import VectorStoreIndex
+import itertools
+#import uuid
 
 # Embedding pipeline imports
 from llama_index.core import Document
@@ -49,78 +52,53 @@ llm = Ollama(
 )
 
 #####
-# Set up RAG data
+# Set up funtions
 #####
-reader = SimpleDirectoryReader(input_dir=DATA_DIR)
-documents = reader.load_data()
-print(len(documents))
-#####
-# Set up ollama embedding
-#####
-ollama_embedding = OllamaEmbedding(
-    model_name=EMBEDDING_MODEL,
-    base_url=OLLAMA_BASE_URL,
-    ollama_additional_kwargs={"mirostat": 0},
-)
+def read_data():
+    """
+    Load files from a directory and return a list of documents 
+    """
+    print(f"Loading documents from {DATA_DIR}")
+    reader = SimpleDirectoryReader(input_dir=DATA_DIR)
+    documents = reader.load_data()
+    print(f"Loaded {len(documents)} documents")
+    return (documents)
 
-# create the pipeline with transformations
-pipeline_no_vector_store = IngestionPipeline(
-    transformations=[
-        SentenceSplitter(chunk_overlap=0),
-        #HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5"),
-        ollama_embedding,
-    ]
-)
-
-
-db = chromadb.PersistentClient(path="./alfred_chroma_db")
-chroma_collection = db.get_or_create_collection("alfred")
-vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-
-pipeline = IngestionPipeline(
-    transformations=[
-        SentenceSplitter(chunk_size=100, chunk_overlap=0),
-        #HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5"),
-        ollama_embedding,
-    ],
-    vector_store=vector_store,
-)
-
-### Test nodes
-async def create_nodes(documents):
-    #nodes = await pipeline.arun(documents=[Document.example()])
-    nodes = await pipeline.arun(show_progress=True, documents=documents)
-    #print(nodes)
-    return nodes
-
-#nodes = asyncio.run(create_nodes(documents=documents))
-
-### Test nodes
-def create_nodes(documents):
-    #nodes = await pipeline.arun(documents=[Document.example()])
+def create_nodes(documents, pipeline):
+    """
+    Create nodes. Need to be provided a LlamaIndex ingestion pipeline 
+    and a list of documents (e.g. from read_data)
+    """
     nodes = pipeline.run(show_progress=True, documents=documents, num_workers=1)
+    #nodes = await pipeline.arun(documents=[Document.example()])
     #print(nodes)
     return nodes
 
-nodes = create_nodes(documents=documents)
 
-print('finishd nodes')
+'''
+ChromaDB has a max batch size of 5461 documents in a given batch
+Our transformations in the IngestionPipeline break one single document up into 
+multiple documents. So even if you only have 100 files you read in with
+SimpleDirectoryReader, you can still exceed the ChromaDB max batch size depending on
+how you chunk up each file in that directory with SentenceSplitter.
+The `show_progress=True` arg in pipeline.run() gives you a lazy way to see
+how many documents you are processing in a given batch.
 
-
-index = VectorStoreIndex.from_vector_store(vector_store, embed_model=ollama_embedding)
-
-
-
-
-
-query_engine = index.as_query_engine(
-    llm=llm,
-    response_mode="tree_summarize",
-)
-q = "What hosts did Pangolin persist on using a service?"
-#q = "what color is the ball?"
-r = query_engine.query(q)
-print(r)
+This function gives you a dirty way to chunk up the documents.
+'''
+def chunk_iterate(lst: list, chunk_size: int, pipeline):
+    """
+    Batches the documents to manage ChromaDB's 5461 max document limit
+    """
+    if chunk_size < len(lst):
+        it = itertools.islice(lst,0,None)
+        while True:
+            chunk = list(itertools.islice(it, chunk_size))
+            if not chunk:
+                break
+            create_nodes(chunk, pipeline=pipeline)
+    else:
+        raise RuntimeError(f"Chunk size ({chunk_size}) needs to be shorter than the length of the list ({len(lst)})")
 
 
 def test_llm(text: str = "Who is Paul Graham?"):
@@ -136,20 +114,137 @@ def test_llm(text: str = "Who is Paul Graham?"):
     resp = llm.complete(text)
     print(resp)
 
+
+#####
+# Set prerequisites for embedding (rag creation and retrieval)
+#####
+
+# Set up embedding
+ollama_embedding = OllamaEmbedding(
+    model_name=EMBEDDING_MODEL,
+    base_url=OLLAMA_BASE_URL,
+    ollama_additional_kwargs={"mirostat": 0},
+)
+
+# Create chroma DB
+db = chromadb.PersistentClient(path="./alfred_chroma_db")
+
+chroma_collection = db.get_or_create_collection("alfred")
+vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+index = VectorStoreIndex.from_vector_store(vector_store, embed_model=ollama_embedding)
+
+# Create ingestion pipeline
+pipeline = IngestionPipeline(
+    transformations=[
+        SentenceSplitter(chunk_size=200, chunk_overlap=40),
+        #HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5"),
+        ollama_embedding,
+    ],
+    vector_store=vector_store,
+)
+
+'''
+# create the pipeline with transformations
+pipeline_no_vector_store = IngestionPipeline(
+    transformations=[
+        SentenceSplitter(chunk_overlap=0),
+        #HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5"),
+        ollama_embedding,
+    ]
+)
+'''
+
+
+#####
+# Some non-working stub code on batching
+#####
+'''
+#db = chromadb.PersistentClient(path="test-large-batch")
+large_batch = [(f"{uuid.uuid4()}", f"document {i}", [0.1] * 1536) for i in range(100000)]
+ids, documents, embeddings = zip(*large_batch)
+batches = create_batches(api=db,ids=list(ids), documents=list(documents), embeddings=list(embeddings))
+collection = db.get_or_create_collection("test")
+for batch in batches:
+    print(f"Adding batch of size {len(batch[0])}")
+    collection.add(ids=batch[0],
+                   documents=batch[3],
+                   embeddings=batch[1],
+                   metadatas=batch[2])
+
+'''
+'''
+max_batch_size = db.get_max_batch_size()
+print("Number of documents that can be inserted at once: ",max_batch_size)
+exit()
+'''
+
+'''
+pseudocde for batching
+
+import math
+accept an arg of file chunk sizes (chunk_size: int)
+#chunks = len(documents)/chunk_size
+#math.ceil(chunks)
+i = 0
+for d in len(documents)
+[i:i+chunk_size]
+
+
+def chunk_iterate
+
+'''
+
+
+### Test nodes
+'''
+async def create_nodes_async(documents):
+    #nodes = await pipeline.arun(documents=[Document.example()])
+    nodes = await pipeline.arun(show_progress=True, documents=documents)
+    #print(nodes)
+    return nodes
+
+nodes = asyncio.run(create_nodes_async(documents=documents))
+'''
+
+
 def main():
-    #test_llm("How many 'r's in strawberry?")
-    print('hi')
+    import sys
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--test', type=str, help="Pass a quoted string to test the LLM is working properly")
+    parser.add_argument('--rag', action='store_true', help="Create RAG vector DB")
+    parser.add_argument('--chunk_rag', type=int, help="Chunk the documents in groups of `n` documents")
+    parser.add_argument('--query', type=str, help="Pass a quoted string to query the RAG")
+
+    args = parser.parse_args()
+
+    if args.test:
+        text = args.test
+        print(f"Sending request of:\n {text}\n to model: {LLM_MODEL}\n at: {OLLAMA_BASE_URL}")
+        #test_llm("How many 'r's in strawberry?")
+        test_llm(text)
+
+    elif args.rag:
+        documents = read_data()
+        nodes = create_nodes(documents=documents, pipeline=pipeline)
+        print('finished nodes')
+
+    elif args.query:
+        q = args.query
+        print(q)
+        query_engine = index.as_query_engine(
+            llm=llm,
+            response_mode="tree_summarize",
+        )
+        r = query_engine.query(q)
+        print(r)
+    
+    elif args.chunk_rag:
+        chunk_rag = args.chunk_rag
+        documents = read_data()
+        chunk_iterate(lst=documents, chunk_size=chunk_rag, pipeline=pipeline)
+
 
 if __name__ == "__main__":
     main()
-
-
-'''
-pass_embedding = ollama_embedding.get_text_embedding_batch(
-    ["This is a passage!", "This is another passage"], show_progress=True
-)
-print(pass_embedding)
-
-query_embedding = ollama_embedding.get_query_embedding("Where is blue?")
-print(query_embedding)
-'''
