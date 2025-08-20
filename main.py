@@ -20,6 +20,13 @@ from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.ingestion import IngestionPipeline
 from llama_index.core import SimpleDirectoryReader
 
+# Add some tools for agents
+from llama_index.core.tools import QueryEngineTool
+from llama_index.core.agent.workflow import (
+    AgentWorkflow,
+    FunctionAgent,
+    ReActAgent,
+)
 
 #####
 # Set up environment
@@ -39,6 +46,11 @@ DATA_DIR = os.getenv('DATA_DIR')
 
 EMBEDDING_MODEL = 'nomic-embed-text:latest'
 LLM_MODEL = 'llama3.1:latest'
+
+SYSTEM_PROMPT_RAG_AGENT="""
+You are a helpful assistant specializing in cybersecurity and incident response.
+You have access to a database containing data from an intrusion.
+"""
 
 #####
 # Set up LLM
@@ -143,6 +155,72 @@ pipeline = IngestionPipeline(
     vector_store=vector_store,
 )
 
+query_engine = index.as_query_engine(
+    llm=llm,
+    response_mode="tree_summarize",
+    similarity_top_k=10
+)
+
+#####
+# Set up reqs for the Agent
+#####
+
+# This is a tool that is used by an agent
+query_engine_tool = QueryEngineTool.from_defaults(
+    query_engine=query_engine,
+    name="RAG Query",
+    description="Queries the RAG of cyber intrusion data",
+    return_direct=False,
+)
+
+#This is an agent. It can be run with the .run() method.
+# Because it uses the .from_tools_or_functions() method
+# it creates an agent from just a tool or function
+query_engine_agent = AgentWorkflow.from_tools_or_functions(
+    [query_engine_tool],
+    llm=llm,
+    system_prompt=SYSTEM_PROMPT_RAG_AGENT
+)
+
+
+agent2 = FunctionAgent(
+    tools=[query_engine_tool],
+    llm=llm,
+    system_prompt=SYSTEM_PROMPT_RAG_AGENT,
+)
+
+#This is also an agent. It can be run with the .run() method
+# However, it can't just accept a tool. It needs an agent ()
+agent = AgentWorkflow(
+    #agents=[calculator_agent, query_agent], root_agent="calculator"
+    #agents=[query_engine_agent]
+    #agents=[query_engine_tool]
+    #agents=[agent2]
+    tools=[query_engine_tool]
+)
+
+# a tool (function) for an agent
+def multiply(a: int, b: int) -> int:
+    """Multiplies two integers and returns the resulting integer"""
+    return a * b
+# an agent that uses a function
+calculator_agent = ReActAgent(
+    name="calculator",
+    description="Performs basic multiplication",
+    system_prompt="You are a calculator assistant. Use your tools for any math operation.",
+    #Note that it uses the function name, and can use it as a tool with no extra work
+    tools=[multiply],
+    llm=llm,
+)
+
+
+async def run_agent(query):
+    response = await agent.run(user_msg=query)
+    #response = await calculator_agent.run(user_msg=query)
+    #response = await agent2.run(user_msg=query)
+    #response = await query_engine_agent.run(user_msg=query)
+    return response
+
 def main():
     import sys
     import argparse
@@ -152,6 +230,7 @@ def main():
     parser.add_argument('--rag', action='store_true', help="Create RAG vector DB")
     parser.add_argument('--chunk_rag', type=int, help="Chunk the documents in groups of `n` documents")
     parser.add_argument('--query', type=str, help="Pass a quoted string to query the RAG")
+    parser.add_argument('--agent',type=str, help="Pass a string to provide to the agent.")
 
     args = parser.parse_args()
 
@@ -169,11 +248,6 @@ def main():
     elif args.query:
         q = args.query
         print(q)
-        query_engine = index.as_query_engine(
-            llm=llm,
-            response_mode="tree_summarize",
-            similarity_top_k=10
-        )
         r = query_engine.query(q)
         print(r)
     
@@ -181,6 +255,13 @@ def main():
         chunk_rag = args.chunk_rag
         documents = read_data()
         chunk_iterate(lst=documents, chunk_size=chunk_rag, pipeline=pipeline)
+    
+    elif args.agent:
+        q = args.agent
+        #pass
+        r = asyncio.run(run_agent(q))
+        #response = await agent.run(user_msg=q)
+        print(r)
 
 
 if __name__ == "__main__":
