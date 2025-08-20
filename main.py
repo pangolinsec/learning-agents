@@ -59,7 +59,7 @@ def read_data():
     Load files from a directory and return a list of documents 
     """
     print(f"Loading documents from {DATA_DIR}")
-    reader = SimpleDirectoryReader(input_dir=DATA_DIR)
+    reader = SimpleDirectoryReader(input_dir=DATA_DIR,recursive=True)
     documents = reader.load_data()
     print(f"Loaded {len(documents)} documents")
     return (documents)
@@ -136,7 +136,7 @@ index = VectorStoreIndex.from_vector_store(vector_store, embed_model=ollama_embe
 # Create ingestion pipeline
 pipeline = IngestionPipeline(
     transformations=[
-        SentenceSplitter(chunk_size=200, chunk_overlap=40),
+        SentenceSplitter(chunk_size=2048, chunk_overlap=40),
         #HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5"),
         ollama_embedding,
     ],
@@ -172,6 +172,7 @@ def main():
         query_engine = index.as_query_engine(
             llm=llm,
             response_mode="tree_summarize",
+            similarity_top_k=10
         )
         r = query_engine.query(q)
         print(r)
